@@ -39,7 +39,7 @@ Instance.new("UICorner",m).CornerRadius=UDim.new(0,8)
 local tb=Instance.new("Frame",m);tb.Size=UDim2.new(1,0,0,30);tb.BackgroundColor3=Color3.fromRGB(14,14,20);tb.BorderSizePixel=0
 Instance.new("UICorner",tb).CornerRadius=UDim.new(0,8)
 local tt=Instance.new("TextLabel",tb);tt.Size=UDim2.new(1,-40,1,0);tt.Position=UDim2.new(0,10,0,0);tt.BackgroundTransparency=1;tt.Text="数据浏览器 v4";tt.TextColor3=Color3.fromRGB(255,200,100);tt.TextXAlignment=Enum.TextXAlignment.Left;tt.Font=Enum.Font.SourceSansBold;tt.TextSize=16
-local cx=Instance.new("TextButton",tb);cx.Size=UDim2.new(0,24,0,24);cx.Position=UDim2.new(1,-28,0,3);cx.BackgroundColor3=Color3.fromRGB(180,40,40);cx.Text="—";cx.TextColor3=Color3.fromRGB(255,255,255);cx.TextSize=14;cx.Font=Enum.Font.SourceSansBold;cx.AutoButtonColor=false
+local cx=Instance.new("TextButton",tb);cx.Size=UDim2.new(0,24,0,24);cx.Position=UDim2.new(1,-28,0,3);cx.BackgroundColor3=Color3.fromRGB(180,40,40);cx.Text="×";cx.TextColor3=Color3.fromRGB(255,255,255);cx.TextSize=14;cx.Font=Enum.Font.SourceSansBold;cx.AutoButtonColor=false
 Instance.new("UICorner",cx).CornerRadius=UDim.new(0,6)
 cx.MouseButton1Click:Connect(function()gui.Visible=false;createRestore()end)
 -- Drag
