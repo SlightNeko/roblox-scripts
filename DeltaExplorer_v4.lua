@@ -96,7 +96,7 @@ local mc=nil
 sb.MouseButton1Click:Connect(function()
  if mc then mc:Disconnect();mc=nil;sb.Text="Start";sb.BackgroundColor3=Color3.fromRGB(45,70,45);L(mp,"Stopped",Color3.fromRGB(255,200,100));return end
  local p=ib.Text;if p==""then L(mp,"Enter path first",Color3.fromRGB(255,100,100));return end
- local tgt=loadstring("return "..p)();if not tgt then L(mp,"Invalid path",Color3.fromRGB(255,100,100));return end
+ local fn,serr=loadstring("return "..p);if not fn then L(mp,"Invalid path: "..tostring(serr),Color3.fromRGB(255,100,100));return end;local ok,tgt=pcall(fn);if not ok or not tgt then L(mp,"Invalid path",Color3.fromRGB(255,100,100));return end
  for _,c in ipairs(mp:GetChildren())do if c:IsA("TextLabel")and c~=mh then c:Destroy()end end
  L(mp,"Watching: "..tgt:GetFullName(),Color3.fromRGB(100,255,100));sb.Text="Stop";sb.BackgroundColor3=Color3.fromRGB(70,45,45)
  mc=tgt.Changed:Connect(function(prop)local v=tgt[prop];if type(v)=="boolean"then v=tostring(v)end;L(mp,"["..tostring(prop).."] = "..tostring(v),Color3.fromRGB(100,200,255))end)
