@@ -142,23 +142,25 @@ local sb=Instance.new("TextButton",mp);sb.Size=UDim2.new(1,-10,0,24);sb.Backgrou
 sb.Text="开始自动监控角色";sb.TextColor3=Color3.fromRGB(200,200,200);sb.TextSize=13;sb.Font=Enum.Font.SourceSans
 sb.AutoButtonColor=false;sb.BorderSizePixel=0;local sbCorner=Instance.new("UICorner",sb);sbCorner.CornerRadius=UDim.new(0,6)
 
-local mc=nil
+local mc=nil;local charConn=nil;local childConn=nil;local monitoring=false
+
 local function clearMonitor()
  for _,c in ipairs(mp:GetChildren())do if c:IsA("TextLabel") and c~=mh then c:Destroy()end end
 end
 
-sb.MouseButton1Click:Connect(function()
- if mc then mc:Disconnect();mc=nil;sb.Text="开始自动监控角色";sb.BackgroundColor3=Color3.fromRGB(45,70,45);L(mp,"已停止",Color3.fromRGB(255,200,100));return end
- clearMonitor()
- local hum=nil;local char=lp.Character
- if char then hum=char:FindFirstChild("Humanoid")end
- if not hum then
-  local conn=lp.CharacterAdded:Connect(function(c)
-   local h=c:FindFirstChild("Humanoid")
-   if h then if conn then conn:Disconnect()end;hum=h end
-  end)
-  if not lp.Character then L(mp,"等待角色出现...",Color3.fromRGB(255,150,100));sb.Text="停止";sb.BackgroundColor3=Color3.fromRGB(70,45,45);return end
- end
+local function stopMonitor(clear)
+ monitoring=false
+ if mc then mc:Disconnect();mc=nil end
+ if charConn then charConn:Disconnect();charConn=nil end
+ if childConn then childConn:Disconnect();childConn=nil end
+ sb.Text="开始自动监控角色";sb.BackgroundColor3=Color3.fromRGB(45,70,45)
+ if clear then clearMonitor() end
+ L(mp,"已停止",Color3.fromRGB(255,200,100))
+end
+
+local function bindHumanoid(hum)
+ if not monitoring then return end
+ if mc then mc:Disconnect();mc=nil end
  L(mp,"监控中: Humanoid",Color3.fromRGB(100,255,100))
  sb.Text="停止";sb.BackgroundColor3=Color3.fromRGB(70,45,45)
  L(mp,"生命 = "..tostring(math.floor(hum.Health)),Color3.fromRGB(100,200,255))
@@ -166,10 +168,55 @@ sb.MouseButton1Click:Connect(function()
  L(mp,"跳跃 = "..tostring(hum.JumpPower),Color3.fromRGB(100,200,255))
  L(mp,"姿态 = "..tostring(hum.PlatformStand),Color3.fromRGB(100,200,255))
  mc=hum.Changed:Connect(function(prop)
+  if not monitoring then return end
   local v=hum[prop];if type(v)=="boolean" then v=tostring(v)end
   L(mp,"["..tostring(prop).."] = "..tostring(v),Color3.fromRGB(100,200,255))
   if prop=="Health" then L(mp,"生命 = "..tostring(math.floor(v)),Color3.fromRGB(100,200,255))end
  end)
+end
+
+local function waitHumanoid(c)
+ if not monitoring then return end
+ L(mp,"等待 Humanoid 加载...",Color3.fromRGB(255,150,100))
+ childConn=c.ChildAdded:Connect(function(ch)
+  if not monitoring then return end
+  if ch.ClassName=="Humanoid" then
+   if childConn then childConn:Disconnect();childConn=nil end
+   bindHumanoid(ch)
+  end
+ end)
+ task.spawn(function()
+  local w=c:WaitForChild("Humanoid",5)
+  if w and w.ClassName=="Humanoid" and monitoring then
+   if childConn then childConn:Disconnect();childConn=nil end
+   bindHumanoid(w)
+  elseif monitoring then
+   stopMonitor(true)
+  end
+ end)
+end
+
+local function startMonitor()
+ stopMonitor(false);monitoring=true
+ sb.Text="停止";sb.BackgroundColor3=Color3.fromRGB(70,45,45)
+ clearMonitor()
+ local char=lp.Character
+ if char then
+  local hum=char:FindFirstChild("Humanoid")
+  if hum then bindHumanoid(hum)else waitHumanoid(char)end
+ else
+  L(mp,"等待角色出现...",Color3.fromRGB(255,150,100))
+  charConn=lp.CharacterAdded:Connect(function(c)
+   if not monitoring then return end
+   if charConn then charConn:Disconnect();charConn=nil end
+   local hum=c:FindFirstChild("Humanoid")
+   if hum then bindHumanoid(hum)else waitHumanoid(c)end
+  end)
+ end
+end
+
+sb.MouseButton1Click:Connect(function()
+ if monitoring then stopMonitor(true)else startMonitor()end
 end)
 
 local sp=tps[5]
@@ -218,6 +265,14 @@ sbb.MouseButton1Click:Connect(function()
  end
 end)
 
+local remoteHooked=false
+local function doRemoteHook()
+ if remoteHooked then return end
+ remoteHooked=true
+ for _,obj in ipairs(game:GetDescendants())do pcall(function()local cn=obj.ClassName;if cn=="RemoteEvent"or cn=="RemoteFunction"or cn=="UnreliableRemoteEvent"then hookR(obj)end end)end
+ game.DescendantAdded:Connect(function(obj)pcall(function()local cn=obj.ClassName;if cn=="RemoteEvent"or cn=="RemoteFunction"or cn=="UnreliableRemoteEvent"then hookR(obj)end end)end)
+end
+
 local rp=tps[6];local rml=80;local rc=0
 
 local cl=Instance.new("TextButton",rp);cl.Size=UDim2.new(1,-10,0,22);cl.BackgroundColor3=Color3.fromRGB(70,45,45)
@@ -241,6 +296,12 @@ local function hookR(obj)
  else local o=obj.FireServer;obj.FireServer=function(self,...)lr("S",obj.ClassName,obj.Name);return o and o(self,...)or nil end end
 end
 
-for _,obj in ipairs(game:GetDescendants())do pcall(function()local cn=obj.ClassName;if cn=="RemoteEvent"or cn=="RemoteFunction"or cn=="UnreliableRemoteEvent"then hookR(obj)end end)end
-game.DescendantAdded:Connect(function(obj)pcall(function()local cn=obj.ClassName;if cn=="RemoteEvent"or cn=="RemoteFunction"or cn=="UnreliableRemoteEvent"then hookR(obj)end end)end)
+local lrInit=Instance.new("TextLabel",rp);lrInit.Size=UDim2.new(1,-10,0,20);lrInit.BackgroundTransparency=1
+lrInit.Text="请先点击顶部「远程」标签页加载监听";lrInit.TextColor3=Color3.fromRGB(255,200,100)
+lrInit.Font=Enum.Font.SourceSans;lrInit.TextSize=12;lrInit.TextWrapped=true
+
+tbs[6].MouseButton1Click:Connect(function()
+ if not remoteHooked then doRemoteHook() end
+ if lrInit then lrInit:Destroy() end
+end)
 
