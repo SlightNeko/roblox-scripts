@@ -237,11 +237,9 @@ local Dragging = false
 local DragStart = Vector2.new()
 local StartPos = UDim2.new()
 
-ScreenGui.InputBegan:Connect(function(input)
+TitleBar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        local absPos = TitleBar.AbsolutePosition
-        local absSize = TitleBar.AbsoluteSize
-        if input.Position.X >= absPos.X and input.Position.X <= absPos.X + absSize.X and input.Position.Y >= absPos.Y and input.Position.Y <= absPos.Y + absSize.Y then
+        if input.Object == TitleBar then
             Dragging = true
             DragStart = input.Position
             StartPos = MainFrame.Position
@@ -276,7 +274,10 @@ local function RestoreMenu()
 end
 
 MinButton.MouseButton1Click:Connect(MinimizeMenu)
-CloseButton.MouseButton1Click:Connect(MinimizeMenu)
+CloseButton.MouseButton1Click:Connect(function()
+    ScreenGui:Destroy()
+    getgenv().DeathBallMenuLoaded = false
+end)
 RestoreButton.MouseButton1Click:Connect(RestoreMenu)
 
 -- Unload -----------------------------------------------------
@@ -332,7 +333,6 @@ task.spawn(function()
 
                     if AutoParry and isLocked and dist < 15 then
                         VirtualInputManager:SendKeyEvent(true, "F", false, game)
-                        VirtualInputManager:SendKeyEvent(false, "F", false, game)
                     end
                 end
             end
