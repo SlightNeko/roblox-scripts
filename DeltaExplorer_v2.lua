@@ -1,21 +1,23 @@
 --[[
-DeltaExplorer v2 — 通用 Roblox Lua 注入器 DeBug 工具
+DeltaExplorer v2 — 纯顶层代码 Roblox 游戏分析工具
 GameId: 通用 (任何 Roblox 游戏)
 功能:
-  1. 元数据面板    — LocalPlayer 信息 + 游戏信息 + 实时 FPS
-  2. Instance 浏览器 — 树形浏览 Workspace（分页，每页30个）
-  3. 值扫描器      — 扫描 NumberValue/IntValue/BoolValue/StringValue
-  4. Remote 发现   — 列出所有 RemoteEvent/RemoteFunction/UnreliableRemoteEvent
-  5. 实时监控      — 输入路径，监听 Changed 事件
-  6. 对象搜索      — 按名称关键词搜索 Instance
-  7. RSPY 数据包嗅探— Hook FireServer/InvokeServer + OnClientEvent，记录通信
+  1. Instance 浏览器  — 树形浏览所有对象（分页、详情弹窗）
+  2. 值扫描器        — 扫描 NumberValue/IntValue/BoolValue/StringValue
+  3. Remote 发现     — 列出所有 RemoteEvent/RemoteFunction/UnreliableRemoteEvent
+  4. 实时监控        — 选中值后实时监听 Changed 事件
+  5. 元数据面板      — LocalPlayer 基本信息 + 角色信息 + FPS
+  6. 对象搜索        — 按名称关键词搜索 Instance
+  7. RSPY 数据包嗅探— Hook Remote 并记录 FireServer/InvokeServer/OnClientEvent 参数
+依赖: 零外部依赖 (纯 Luau)
+兼容: 标准 UNC 注入器 (Delta/Ninja/Synapse/Codex)
+框架: 纯顶层代码 — 无 return(function(...) wrapper, 无 end)(...) 结尾
+      所有函数/变量 local, 全局仅 _G.DENotify 系列
+创建日期: 2026-07-17
 版本: v2.0
-创作日期: 2026-07-17
-兼容: 标准 UNC 注入器（Delta / Ninja / Codex 等）
-结构: 纯顶层代码，无 return(function(...) 包装
 --]]
 
--- =========================== 服务引用（SafeGetService） ===========================
+-- =========================== SafeGetService ===========================
 local FunctionServiceCache = {}
 local function SafeGetService(serviceName)
     if FunctionServiceCache[serviceName] ~= nil then
@@ -34,24 +36,322 @@ end
 
 local Players = SafeGetService("Players")
 local Workspace = SafeGetService("Workspace")
+local CoreGui = SafeGetService("CoreGui")
 local UserInputService = SafeGetService("UserInputService")
 local RunService = SafeGetService("RunService")
 local ReplicatedStorage = SafeGetService("ReplicatedStorage")
 local Lighting = SafeGetService("Lighting")
 local TweenService = SafeGetService("TweenService")
 local StarterGui = SafeGetService("StarterGui")
-local CoreGui = SafeGetService("CoreGui")
 local HttpService = SafeGetService("HttpService")
+
+-- =========================== 全局通知系统 (DENotify) ===========================
+_G.DENotifySystem = {
+    Queue = {},
+    Ready = false,
+    Container = nil,
+    ActiveNotifications = {},
+    MaxNotifications = 5,
+    DefaultDuration = 4,
+    TweenSpeed = 0.35,
+    Theme = {
+        Background = Color3.fromRGB(20, 20, 25),
+        BackgroundAccent = Color3.fromRGB(28, 28, 35),
+        Stroke = Color3.fromRGB(60, 60, 75),
+        Title = Color3.fromRGB(255, 255, 255),
+        Text = Color3.fromRGB(180, 180, 190),
+        Success = Color3.fromRGB(80, 220, 120),
+        Error = Color3.fromRGB(255, 90, 90),
+        Warning = Color3.fromRGB(255, 190, 70),
+        Info = Color3.fromRGB(88, 160, 255),
+        ProgressBg = Color3.fromRGB(40, 40, 50)
+    },
+    Icons = {
+        Success = "rbxassetid://93202927221730",
+        Error = "rbxassetid://76821953846248",
+        Warning = "rbxassetid://125920361880643",
+        Info = "rbxassetid://124560466474914",
+        Close = "rbxassetid://110786993356448",
+    }
+}
+
+function _G.DENotify(title, text, duration, nType)
+    duration = duration or _G.DENotifySystem.DefaultDuration
+    title = title or "通知"
+    text = text or ""
+    nType = nType or "Info"
+    if not _G.DENotifySystem.Ready then
+        table.insert(_G.DENotifySystem.Queue, {title, text, duration, nType})
+        return
+    end
+    pcall(function()
+        _G.DENotifySystem.CreateNotification(title, text, duration, nType)
+    end)
+end
+
+function _G.DENotifySuccess(title, text, duration)
+    _G.DENotify(title, text, duration or 3, "Success")
+end
+
+function _G.DENotifyError(title, text, duration)
+    _G.DENotify(title, text, duration or 5, "Error")
+end
+
+function _G.DENotifyWarning(title, text, duration)
+    _G.DENotify(title, text, duration or 4, "Warning")
+end
+
+function _G.DENotifyInfo(title, text, duration)
+    _G.DENotify(title, text, duration or 4, "Info")
+end
+
+-- =========================== NotifySystem 核心 ===========================
+function _G.DENotifySystem.CreateNotification(title, text, duration, nType)
+    local ts = TweenService
+    if not ts then return end
+    if not _G.DENotifySystem.Container or not _G.DENotifySystem.Container.Parent then
+        _G.DENotifySystem.SetupContainer()
+    end
+    local container = _G.DENotifySystem.Container
+    if not container then return end
+    local theme = _G.DENotifySystem.Theme
+    local typeColor = theme[nType] or theme.Info
+    local iconId = _G.DENotifySystem.Icons[nType] or _G.DENotifySystem.Icons.Info
+    while #_G.DENotifySystem.ActiveNotifications >= _G.DENotifySystem.MaxNotifications do
+        local oldest = _G.DENotifySystem.ActiveNotifications[1]
+        if oldest then oldest:Close() end
+        task.wait(0.05)
+    end
+    local frame = Instance.new("Frame")
+    frame.Name = "DENotification"
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel = 0
+    frame.Size = UDim2.new(0, 0, 0, 0)
+    frame.ClipsDescendants = true
+    local mainBg = Instance.new("Frame")
+    mainBg.Name = "MainBg"
+    mainBg.Size = UDim2.new(1, 0, 1, 0)
+    mainBg.BackgroundColor3 = theme.Background
+    mainBg.BackgroundTransparency = 0.02
+    mainBg.BorderSizePixel = 0
+    mainBg.Parent = frame
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 14)
+    mainCorner.Parent = mainBg
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = theme.Stroke
+    stroke.Thickness = 1.2
+    stroke.Transparency = 0.3
+    stroke.Parent = mainBg
+    local accentLine = Instance.new("Frame")
+    accentLine.Name = "AccentLine"
+    accentLine.Size = UDim2.new(0, 3, 1, -16)
+    accentLine.Position = UDim2.new(0, 8, 0, 8)
+    accentLine.BackgroundColor3 = typeColor
+    accentLine.BorderSizePixel = 0
+    accentLine.Parent = mainBg
+    local accentCorner = Instance.new("UICorner")
+    accentCorner.CornerRadius = UDim.new(1, 0)
+    accentCorner.Parent = accentLine
+    local icon = Instance.new("ImageLabel")
+    icon.Name = "Icon"
+    icon.Size = UDim2.new(0, 20, 0, 20)
+    icon.Position = UDim2.new(0, 20, 0, 12)
+    icon.BackgroundTransparency = 1
+    icon.Image = iconId
+    icon.ImageColor3 = typeColor
+    icon.Parent = mainBg
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Name = "Title"
+    titleLabel.Size = UDim2.new(1, -90, 0, 22)
+    titleLabel.Position = UDim2.new(0, 46, 0, 11)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = title
+    titleLabel.TextColor3 = theme.Title
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 15
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    titleLabel.Parent = mainBg
+    local closeBtn = Instance.new("ImageButton")
+    closeBtn.Name = "CloseBtn"
+    closeBtn.Size = UDim2.new(0, 22, 0, 22)
+    closeBtn.Position = UDim2.new(1, -30, 0, 10)
+    closeBtn.BackgroundTransparency = 1
+    closeBtn.Image = _G.DENotifySystem.Icons.Close
+    closeBtn.ImageColor3 = Color3.fromRGB(140, 140, 150)
+    closeBtn.ImageTransparency = 0.3
+    closeBtn.AutoButtonColor = false
+    closeBtn.Parent = mainBg
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Name = "Content"
+    textLabel.Size = UDim2.new(1, -66, 0, 0)
+    textLabel.Position = UDim2.new(0, 46, 0, 36)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = text
+    textLabel.TextColor3 = theme.Text
+    textLabel.Font = Enum.Font.Gotham
+    textLabel.TextSize = 13
+    textLabel.TextXAlignment = Enum.TextXAlignment.Left
+    textLabel.TextWrapped = true
+    textLabel.AutomaticSize = Enum.AutomaticSize.Y
+    textLabel.Parent = mainBg
+    local progressBg = Instance.new("Frame")
+    progressBg.Name = "ProgressBg"
+    progressBg.Size = UDim2.new(1, -16, 0, 3)
+    progressBg.Position = UDim2.new(0, 8, 1, -9)
+    progressBg.BackgroundColor3 = theme.ProgressBg
+    progressBg.BorderSizePixel = 0
+    progressBg.Parent = mainBg
+    local progressCorner = Instance.new("UICorner")
+    progressCorner.CornerRadius = UDim.new(1, 0)
+    progressCorner.Parent = progressBg
+    local progressBar = Instance.new("Frame")
+    progressBar.Name = "ProgressBar"
+    progressBar.Size = UDim2.new(1, 0, 1, 0)
+    progressBar.BackgroundColor3 = typeColor
+    progressBar.BorderSizePixel = 0
+    progressBar.Parent = progressBg
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(1, 0)
+    barCorner.Parent = progressBar
+    frame.Parent = container
+    task.wait()
+    local textHeight = textLabel.TextBounds.Y
+    local titleWidth = titleLabel.TextBounds.X
+    local textWidth = textLabel.TextBounds.X
+    local width = math.clamp(math.max(titleWidth + 100, textWidth + 70), 280, 400)
+    local height = math.max(78, 52 + textHeight)
+    local notification = {
+        Frame = frame, MainBg = mainBg, ProgressBar = progressBar,
+        Duration = duration, Remaining = duration, Paused = false, Closed = false,
+        Close = function(self)
+            if self.Closed then return end
+            self.Closed = true
+            self:AnimateOut()
+        end,
+        AnimateOut = function(self)
+            for i, n in ipairs(_G.DENotifySystem.ActiveNotifications) do
+                if n == self then table.remove(_G.DENotifySystem.ActiveNotifications, i) break end
+            end
+            if ts then
+                ts:Create(self.MainBg, TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                    BackgroundTransparency = 1
+                }):Play()
+                ts:Create(self.Frame, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+                    Size = UDim2.new(0, 0, 0, height),
+                    Position = UDim2.new(0, 0, 0, self.Frame.AbsolutePosition.Y - container.AbsolutePosition.Y)
+                }):Play()
+            end
+            task.delay(0.3, function() self.Frame:Destroy() end)
+        end
+    }
+    table.insert(_G.DENotifySystem.ActiveNotifications, notification)
+    frame.Size = UDim2.new(0, width, 0, 0)
+    if ts then
+        ts:Create(frame, TweenInfo.new(_G.DENotifySystem.TweenSpeed, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, width, 0, height)
+        }):Play()
+        ts:Create(mainBg, TweenInfo.new(0.25, Enum.EasingStyle.Quad), {
+            BackgroundTransparency = 0.02
+        }):Play()
+    end
+    closeBtn.MouseEnter:Connect(function()
+        if ts then ts:Create(closeBtn, TweenInfo.new(0.15), {
+            ImageTransparency = 0, ImageColor3 = Color3.fromRGB(255, 90, 90)
+        }):Play() end
+    end)
+    closeBtn.MouseLeave:Connect(function()
+        if ts then ts:Create(closeBtn, TweenInfo.new(0.15), {
+            ImageTransparency = 0.3, ImageColor3 = Color3.fromRGB(140, 140, 150)
+        }):Play() end
+    end)
+    closeBtn.MouseButton1Click:Connect(function() notification:Close() end)
+    mainBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            notification.Paused = true
+            if ts then ts:Create(mainBg, TweenInfo.new(0.2), {BackgroundColor3 = theme.BackgroundAccent}):Play() end
+        end
+    end)
+    mainBg.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            notification.Paused = false
+            if ts then ts:Create(mainBg, TweenInfo.new(0.2), {BackgroundColor3 = theme.Background}):Play() end
+        end
+    end)
+    task.spawn(function()
+        local startTime = tick()
+        while notification.Remaining > 0 and not notification.Closed do
+            if not notification.Paused then
+                notification.Remaining = duration - (tick() - startTime)
+                local progress = math.clamp(notification.Remaining / duration, 0, 1)
+                progressBar.Size = UDim2.new(progress, 0, 1, 0)
+            else
+                startTime = tick() - (duration - notification.Remaining)
+            end
+            task.wait(0.03)
+        end
+        if not notification.Closed then notification:Close() end
+    end)
+end
+
+function _G.DENotifySystem.SetupContainer()
+    local coreGui = CoreGui
+    local players = Players
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "DENotifyGUI_" .. math.random(10000, 99999)
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.DisplayOrder = 99999
+    if coreGui then
+        pcall(function() gui.Parent = coreGui end)
+    end
+    if not gui.Parent and players and players.LocalPlayer then
+        pcall(function() gui.Parent = players.LocalPlayer:WaitForChild("PlayerGui") end)
+    end
+    if not gui.Parent then return end
+    local container = Instance.new("Frame")
+    container.Name = "Container"
+    container.Size = UDim2.new(0, 420, 1, -30)
+    container.Position = UDim2.new(1, -15, 0, 15)
+    container.AnchorPoint = Vector2.new(1, 0)
+    container.BackgroundTransparency = 1
+    container.Parent = gui
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.VerticalAlignment = Enum.VerticalAlignment.Top
+    layout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+    layout.Padding = UDim.new(0, 12)
+    layout.Parent = container
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 15)
+    padding.PaddingRight = UDim.new(0, 15)
+    padding.Parent = container
+    _G.DENotifySystem.Container = container
+    _G.DENotifySystem.Ready = true
+    _G.DENotifySystem.ProcessQueue()
+end
+
+function _G.DENotifySystem.ProcessQueue()
+    if #_G.DENotifySystem.Queue == 0 then return end
+    local queue = table.clone(_G.DENotifySystem.Queue)
+    _G.DENotifySystem.Queue = {}
+    for i, data in ipairs(queue) do
+        task.delay((i-1) * 0.15, function()
+            _G.DENotify(unpack(data))
+        end)
+    end
+end
 
 -- =========================== 常量 ===========================
 local VERSION = "v2.0"
 local APP_NAME = "DeltaExplorer " .. VERSION
 local MAX_LIST_ITEMS = 30
 local SCAN_DEPTH_LIMIT = 20
-local REMOTE_SCAN_DEPTH = 10
+local MONITOR_INTERVAL = 0.5
+local REMOTE_SCAN_DEPTH = 12
 
--- =========================== 全局状态 ===========================
-local currentTab = "metadata"
+-- =========================== 全局状态变量 ===========================
 local monitorConnections = {}
 local browserPage = 1
 local searchResults = {}
@@ -61,20 +361,18 @@ local selectedMonitorPath = nil
 local monitorLogs = {}
 local monitoredValue = nil
 local monitorRunning = false
-local DE_GUI = nil
-local DE_MainUI = nil
-local infoPopup = nil
-local browserState = { currentRoot = nil }
-
--- RSPY 状态
 local rspyRunning = false
 local rspyRecords = {}
 local rspyHooks = {}
 local MAX_RSPY_RECORDS = 500
 local rspyBatchId = 0
-local rspyLastBatchTime = 0
 local rspyRefreshNeeded = false
 local rspyRefreshConn = nil
+
+local DE_BrowserRoot = nil
+local DE_InfoPopup = nil
+local DE_GUI = nil
+local DE_MainUI = nil
 
 -- =========================== 工具函数 ===========================
 local function GetTimestamp()
@@ -202,27 +500,12 @@ local function MakeDivider(parent, pos, sizeOrWidth)
 end
 
 local function ClearScrollFrame(sf)
-    if not sf then return end
     for _, v in ipairs(sf:GetChildren()) do
         if v:IsA("GuiObject") then
             v:Destroy()
         end
     end
     sf.CanvasSize = UDim2.new(0, 0, 0, 0)
-end
-
--- =========================== 通知系统（轻量版） ===========================
-local function ShowNotification(title, text, duration)
-    duration = duration or 3
-    pcall(function()
-        if StarterGui then
-            StarterGui:SetCore("SendNotification", {
-                Title = title,
-                Text = text,
-                Duration = duration
-            })
-        end
-    end)
 end
 
 -- =========================== 核心扫描函数 ===========================
@@ -322,9 +605,9 @@ end
 
 -- =========================== 实例信息弹窗 ===========================
 local function ShowInstanceInfo(inst)
-    if infoPopup and infoPopup.Parent then
-        infoPopup:Destroy()
-        infoPopup = nil
+    if DE_InfoPopup and DE_InfoPopup.Parent then
+        DE_InfoPopup:Destroy()
+        DE_InfoPopup = nil
     end
     local summary = GetInstanceSummary(inst)
     local overlay = Instance.new("Frame")
@@ -337,22 +620,15 @@ local function ShowInstanceInfo(inst)
     else
         pcall(function() overlay.Parent = DE_GUI end)
     end
-    infoPopup = overlay
-
+    DE_InfoPopup = overlay
     local popup = MakeFrame(overlay, UDim2.new(0, 340, 0, 420), UDim2.new(0.5, -170, 0.5, -210), Color3.fromRGB(25, 25, 35), 0)
     MakeLabel(popup, "🔍 " .. inst.Name, UDim2.new(1, -10, 0, 26), UDim2.new(0, 5, 0, 5), Color3.fromRGB(255, 200, 100), 18, Enum.TextXAlignment.Left)
     MakeButton(popup, "✕", UDim2.new(0, 30, 0, 26), UDim2.new(1, -36, 0, 5), Color3.fromRGB(80, 30, 30),
-        function()
-            overlay:Destroy()
-            infoPopup = nil
-        end)
+        function() overlay:Destroy() DE_InfoPopup = nil end)
     local scroll = MakeScrollingFrame(popup, UDim2.new(1, -10, 1, -40), UDim2.new(0, 5, 0, 36))
-
     local fields = {
-        {"名称", summary.Name},
-        {"类名", summary.ClassName},
-        {"父对象", summary.Parent},
-        {"完整路径", summary.FullPath},
+        {"名称", summary.Name}, {"类名", summary.ClassName},
+        {"父对象", summary.Parent}, {"完整路径", summary.FullPath},
         {"子对象数", tostring(summary.ChildCount)},
     }
     for _, f in ipairs(fields) do
@@ -361,7 +637,6 @@ local function ShowInstanceInfo(inst)
         MakeLabel(row, f[2], UDim2.new(1, -90, 1, 0), UDim2.new(0, 88, 0, 0), Color3.fromRGB(220, 220, 220), 13)
         MakeDivider(row, UDim2.new(0, 5, 1, 0), UDim2.new(1, -10, 0, 0))
     end
-
     if next(summary.Properties) then
         MakeLabel(scroll, "--- 属性 ---", UDim2.new(1, -4, 0, 22), nil, Color3.fromRGB(100, 200, 255), 14)
         for k, v in pairs(summary.Properties) do
@@ -381,73 +656,19 @@ local function ShowInstanceInfo(inst)
         end
     end
     MakeLabel(scroll, "点击遮罩层关闭", UDim2.new(1, -4, 0, 22), nil, Color3.fromRGB(120, 120, 120), 12, Enum.TextXAlignment.Center)
-end
-
--- =========================== Tab 1: 元数据面板 ===========================
-local function BuildMetadata(container)
-    ClearScrollFrame(container)
-    MakeLabel(container, "元数据面板", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, 4), Color3.fromRGB(255, 200, 200), 16)
-    local lp = Players and Players.LocalPlayer
-    local yPos = 34
-
-    if lp then
-        local fields = {
-            {"用户名", lp.Name},
-            {"显示名", lp.DisplayName},
-            {"用户ID", tostring(lp.UserId)},
-            {"账号年龄", tostring(lp.AccountAge) .. " 天"},
-            {"会员", lp.MembershipType == Enum.MembershipType.Premium and "Premium" or "免费"},
-            {"Locale", lp.LocaleId},
-        }
-        for _, f in ipairs(fields) do
-            local row = MakeFrame(container, UDim2.new(1, -10, 0, 30), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(35, 35, 45), 0)
-            MakeLabel(row, f[1] .. ":", UDim2.new(0, 80, 1, 0), UDim2.new(0, 8, 0, 0), Color3.fromRGB(150, 150, 150), 13)
-            MakeLabel(row, f[2], UDim2.new(1, -100, 1, 0), UDim2.new(0, 92, 0, 0), Color3.fromRGB(220, 220, 220), 13)
-            yPos = yPos + 33
-        end
-    else
-        MakeLabel(container, "LocalPlayer 不可用", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(255, 100, 100), 14)
-        yPos = yPos + 28
-    end
-
-    MakeDivider(container, UDim2.new(0, 5, 0, yPos), UDim2.new(1, -10, 0, 1))
-    yPos = yPos + 8
-    MakeLabel(container, "游戏信息", UDim2.new(1, -10, 0, 22), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(200, 255, 200), 14)
-    yPos = yPos + 24
-
-    local gameFields = {
-        {"PlaceId", tostring(game.PlaceId)},
-        {"GameId", tostring(game.GameId)},
-        {"名称", game.Name},
-        {"FPS", "计算中..."},
-    }
-    for _, f in ipairs(gameFields) do
-        local row = MakeFrame(container, UDim2.new(1, -10, 0, 28), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(35, 35, 45), 0)
-        MakeLabel(row, f[1] .. ":", UDim2.new(0, 80, 1, 0), UDim2.new(0, 8, 0, 0), Color3.fromRGB(150, 150, 150), 13)
-        MakeLabel(row, f[2], UDim2.new(1, -100, 1, 0), UDim2.new(0, 92, 0, 0), Color3.fromRGB(220, 220, 220), 13)
-        yPos = yPos + 31
-    end
-
-    if RunService then
-        local fpsLabel = MakeLabel(container, "", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(100, 255, 100), 13)
-        local lastTime = tick()
-        local frameCount = 0
-        local fpsConn = RunService.RenderStepped:Connect(function()
-            frameCount = frameCount + 1
-            local now = tick()
-            if now - lastTime >= 1 then
-                local fps = math.floor(frameCount / (now - lastTime))
-                fpsLabel.Text = "实时 FPS: " .. tostring(fps)
-                frameCount = 0
-                lastTime = now
-            end
-        end)
-        table.insert(monitorConnections, fpsConn)
-        yPos = yPos + 24
+    -- 监听按钮
+    if inst:IsA("NumberValue") or inst:IsA("IntValue") or inst:IsA("StringValue") or inst:IsA("BoolValue") then
+        MakeButton(scroll, "📊 监控此对象", UDim2.new(1, -4, 0, 34), nil, Color3.fromRGB(50, 60, 80),
+            function()
+                overlay:Destroy()
+                DE_InfoPopup = nil
+                selectedMonitorPath = summary.FullPath
+                monitoredValue = inst
+            end)
     end
 end
 
--- =========================== Tab 2: Instance 浏览器 ===========================
+-- =========================== Tab 1: Instance 浏览器 ===========================
 local function BuildBrowserTree(container, root, page)
     ClearScrollFrame(container)
     local items = {}
@@ -464,7 +685,6 @@ local function BuildBrowserTree(container, root, page)
     browserPage = page
     local startIdx = (page - 1) * MAX_LIST_ITEMS + 1
     local endIdx = math.min(startIdx + MAX_LIST_ITEMS - 1, #items)
-
     MakeLabel(container, "路径: " .. root.Name, UDim2.new(1, -10, 0, 22), UDim2.new(0, 5, 0, 2), Color3.fromRGB(100, 200, 255), 13)
     if totalPages > 1 then
         MakeLabel(container, string.format("第 %d/%d 页 (共 %d 项)", page, totalPages, #items),
@@ -473,13 +693,12 @@ local function BuildBrowserTree(container, root, page)
         MakeLabel(container, string.format("共 %d 个子对象", #items),
             UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 24), Color3.fromRGB(180, 180, 180), 12)
     end
-
     local pageY = 44
     if totalPages > 1 then
         local prevBtn = MakeButton(container, "◀ 上一页", UDim2.new(0, 80, 0, 28), UDim2.new(0, 5, 0, pageY), Color3.fromRGB(50, 50, 70),
             function()
                 if browserPage > 1 then
-                    BuildBrowserTree(container, browserState.currentRoot or Workspace, browserPage - 1)
+                    BuildBrowserTree(container, DE_BrowserRoot or Workspace, browserPage - 1)
                 end
             end)
         if page == 1 then prevBtn.BackgroundTransparency = 0.6 prevBtn.Active = false end
@@ -487,33 +706,27 @@ local function BuildBrowserTree(container, root, page)
         local nextBtn = MakeButton(container, "下一页 ▶", UDim2.new(0, 80, 0, 28), UDim2.new(0, 150, 0, pageY), Color3.fromRGB(50, 50, 70),
             function()
                 if browserPage < totalPages then
-                    BuildBrowserTree(container, browserState.currentRoot or Workspace, browserPage + 1)
+                    BuildBrowserTree(container, DE_BrowserRoot or Workspace, browserPage + 1)
                 end
             end)
         if page == totalPages then nextBtn.BackgroundTransparency = 0.6 nextBtn.Active = false end
     end
-
     local buttonY = pageY + (totalPages > 1 and 34 or 0)
     if root ~= Workspace and root ~= Players and root ~= game then
         MakeButton(container, "⬆ 返回上级", UDim2.new(0, 100, 0, 28), UDim2.new(0, 5, 0, buttonY), Color3.fromRGB(60, 50, 50),
             function()
                 local parentOk, parent = pcall(function() return root.Parent end)
                 if parentOk and parent then
-                    browserState.currentRoot = parent
+                    DE_BrowserRoot = parent
                     BuildBrowserTree(container, parent, 1)
                 end
             end)
         buttonY = buttonY + 32
     end
-
     MakeButton(container, "🔄 刷新", UDim2.new(0, 80, 0, 28), UDim2.new(0, 110, 0, buttonY), Color3.fromRGB(50, 60, 50),
-        function()
-            BuildBrowserTree(container, browserState.currentRoot or Workspace, 1)
-        end)
-
+        function() BuildBrowserTree(container, DE_BrowserRoot or Workspace, 1) end)
     local listY = buttonY + 36
     local listFrame = MakeScrollingFrame(container, UDim2.new(1, -10, 1, -(listY + 10)), UDim2.new(0, 5, 0, listY))
-
     for i = startIdx, endIdx do
         local item = items[i]
         local itemFrame = MakeFrame(listFrame, UDim2.new(1, -4, 0, 30), nil, Color3.fromRGB(35, 35, 45), 0)
@@ -541,29 +754,25 @@ local function BuildBrowserTree(container, root, page)
             b.Text = ""
             b.Parent = itemFrame
             b.MouseButton1Click:Connect(function()
-                browserState.currentRoot = item
+                DE_BrowserRoot = item
                 BuildBrowserTree(container, item, 1)
             end)
         end
         local infoBtn = MakeButton(itemFrame, "ℹ", UDim2.new(0, 28, 0, 24), UDim2.new(1, -32, 0, 3), Color3.fromRGB(60, 60, 80),
-            function()
-                ShowInstanceInfo(item)
-            end)
+            function() ShowInstanceInfo(item) end)
         infoBtn.TextSize = 16
     end
 end
 
--- =========================== Tab 3: 值扫描器 ===========================
+-- =========================== Tab 2: 值扫描器 ===========================
 local function BuildValueScanner(container)
     ClearScrollFrame(container)
     MakeLabel(container, "值扫描器", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, 4), Color3.fromRGB(255, 200, 100), 16)
     MakeLabel(container, "设置数值范围，扫描 NumberValue/IntValue 等实例", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
-
     local minBox = MakeTextBox(container, "最小值 (如: 0)", UDim2.new(0, 120, 0, 36), UDim2.new(0, 5, 0, 52))
     local maxBox = MakeTextBox(container, "最大值 (如: 100)", UDim2.new(0, 120, 0, 36), UDim2.new(0, 130, 0, 52))
     local resultLabel = MakeLabel(container, "结果: 等待扫描", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, 92), Color3.fromRGB(180, 180, 180), 13)
-
-    MakeButton(container, "🔍 开始扫描", UDim2.new(0, 140, 0, 36), UDim2.new(0, 5, 0, 114), Color3.fromRGB(50, 80, 50),
+    local scanBtn = MakeButton(container, "🔍 开始扫描", UDim2.new(0, 140, 0, 36), UDim2.new(0, 5, 0, 114), Color3.fromRGB(50, 80, 50),
         function()
             local minVal = tonumber(minBox.Text)
             local maxVal = tonumber(maxBox.Text)
@@ -608,28 +817,25 @@ local function BuildValueScanner(container)
                     end)
                     MakeLabel(row, string.format("%.2f  |  %s", r.val, r.inst.ClassName .. ": " .. path),
                         UDim2.new(1, -5, 1, 0), UDim2.new(0, 5, 0, 0), Color3.fromRGB(180, 220, 180), 11)
+                    MakeButton(row, "ℹ", UDim2.new(0, 24, 0, 22), UDim2.new(1, -28, 0, 3), Color3.fromRGB(60, 60, 80),
+                        function() ShowInstanceInfo(r.inst) end):TextSize = 14
                 end
             end)
         end)
-
     MakeButton(container, "清空结果", UDim2.new(0, 100, 0, 36), UDim2.new(0, 150, 0, 114), Color3.fromRGB(60, 40, 40),
         function()
             resultLabel.Text = "结果: 等待扫描"
-            local existing = container:FindFirstChildOfClass("ScrollingFrame")
-            while existing do
-                existing:Destroy()
-                existing = container:FindFirstChildOfClass("ScrollingFrame")
-            end
+            local sf = container:FindFirstChildOfClass("ScrollingFrame")
+            while sf do sf:Destroy() sf = container:FindFirstChildOfClass("ScrollingFrame") end
         end)
 end
 
--- =========================== Tab 4: Remote 发现 ===========================
+-- =========================== Tab 3: Remote 发现 ===========================
 local function BuildRemoteDiscovery(container)
     ClearScrollFrame(container)
     MakeLabel(container, "Remote 发现", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, 4), Color3.fromRGB(100, 200, 255), 16)
-    MakeLabel(container, "列出所有 RemoteEvent/RemoteFunction", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
+    MakeLabel(container, "列出所有 RemoteEvent/RemoteFunction/UnreliableRemoteEvent", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
     local resultLabel = MakeLabel(container, "未扫描", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, 48), Color3.fromRGB(180, 180, 180), 13)
-
     MakeButton(container, "🔍 扫描 Remote", UDim2.new(0, 140, 0, 36), UDim2.new(0, 5, 0, 72), Color3.fromRGB(50, 50, 80),
         function()
             resultLabel.Text = "扫描中..."
@@ -665,64 +871,66 @@ local function BuildRemoteDiscovery(container)
                     MakeLabel(row, icon .. " " .. r.inst.ClassName .. ": " .. r.inst.Name,
                         UDim2.new(1, -5, 0, 16), UDim2.new(0, 5, 0, 1), Color3.fromRGB(180, 200, 255), 13)
                     MakeLabel(row, r.path, UDim2.new(1, -5, 0, 14), UDim2.new(0, 5, 0, 17), Color3.fromRGB(140, 140, 160), 10)
+                    MakeButton(row, "ℹ", UDim2.new(0, 24, 0, 22), UDim2.new(1, -28, 0, 5), Color3.fromRGB(60, 60, 80),
+                        function() ShowInstanceInfo(r.inst) end):TextSize = 14
                 end
             end)
         end)
 end
 
--- =========================== Tab 5: 实时监控 ===========================
+-- =========================== Tab 4: 实时监控 ===========================
 local function BuildMonitor(container)
     ClearScrollFrame(container)
     MakeLabel(container, "实时监控", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, 4), Color3.fromRGB(200, 255, 200), 16)
-    MakeLabel(container, "输入 Instance 完整路径，实时监控其值变化", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
+    MakeLabel(container, "选中值对象后实时监听 Changed 事件", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
     local pathBox = MakeTextBox(container, "路径 (如: Workspace.Part.NumberValue)", UDim2.new(1, -20, 0, 36), UDim2.new(0, 5, 0, 50))
     local statusLabel = MakeLabel(container, "监控状态: 未启动", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, 90), Color3.fromRGB(180, 180, 180), 13)
     local monitorLog = MakeScrollingFrame(container, UDim2.new(1, -10, 1, -140), UDim2.new(0, 5, 0, 120))
     local logContainer = monitorLog
-
     MakeButton(container, "▶ 开始监控", UDim2.new(0, 120, 0, 34), UDim2.new(0, 5, 0, 96), Color3.fromRGB(50, 80, 50),
         function()
             if monitorRunning then return end
             local path = pathBox.Text
-            if path == "" then statusLabel.Text = "请输入路径" return end
-            statusLabel.Text = "正在解析路径: " .. path
-            local target = nil
-            local ok = pcall(function()
-                target = game
-                for _, part in ipairs(SplitString(path, "/")) do
-                    if part ~= "" then
-                        target = target[part]
+            if path ~= "" then
+                statusLabel.Text = "正在解析路径: " .. path
+                local target = nil
+                local ok = pcall(function()
+                    target = game
+                    for _, part in ipairs(SplitString(path, "/")) do
+                        if part ~= "" then target = target[part] end
                     end
+                end)
+                if ok and target then
+                    monitoredValue = target
+                    selectedMonitorPath = path
                 end
-            end)
-            if not ok or not target then
-                statusLabel.Text = "错误: 未找到对象"
+            end
+            if not monitoredValue then
+                statusLabel.Text = "错误: 未选择/未找到对象"
                 return
             end
-            monitoredValue = target
-            selectedMonitorPath = path
             monitorRunning = true
-            statusLabel.Text = "监控中: " .. path .. " (值: " .. tostring(target.Value) .. ")"
+            statusLabel.Text = "监控中: " .. (selectedMonitorPath or monitoredValue.Name) .. " (初始值: " .. tostring(pcall(function() return monitoredValue.Value end) and monitoredValue.Value or "N/A") .. ")"
             ClearScrollFrame(logContainer)
-            local conn = RunService and RunService.Heartbeat:Connect(function()
-                if not monitorRunning or not monitoredValue or not monitoredValue.Parent then
-                    monitorRunning = false
-                    statusLabel.Text = "监控已停止 (对象已销毁)"
-                    if conn then conn:Disconnect() end
+            -- 使用 Changed 事件监听
+            local changedConn
+            changedConn = monitoredValue.Changed:Connect(function(newVal)
+                if not monitorRunning then
+                    if changedConn then changedConn:Disconnect() end
                     return
                 end
-                local ok2, val = pcall(function() return monitoredValue.Value end)
-                if ok2 then
-                    local ts = GetTimestamp()
-                    local line = string.format("[%s] %s = %s", ts, path, tostring(val))
-                    MakeLabel(logContainer, line, UDim2.new(1, -4, 0, 18), nil, Color3.fromRGB(180, 255, 180), 11)
-                end
+                local ts = GetTimestamp()
+                local line = string.format("[%s] → %s", ts, tostring(newVal))
+                local label = MakeLabel(logContainer, line, UDim2.new(1, -4, 0, 18), nil, Color3.fromRGB(180, 255, 180), 11)
             end)
-            if conn then
-                table.insert(monitorConnections, conn)
+            table.insert(monitorConnections, changedConn)
+            -- 也显示当前值
+            local valOk, curVal = pcall(function() return monitoredValue.Value end)
+            if valOk then
+                MakeLabel(logContainer, string.format("[%s] 初始值 = %s", GetTimestamp(), tostring(curVal)),
+                    UDim2.new(1, -4, 0, 18), nil, Color3.fromRGB(100, 255, 100), 11)
             end
         end)
-
     MakeButton(container, "⏹ 停止监控", UDim2.new(0, 120, 0, 34), UDim2.new(0, 130, 0, 96), Color3.fromRGB(80, 40, 40),
         function()
             monitorRunning = false
@@ -732,6 +940,93 @@ local function BuildMonitor(container)
             end
             monitorConnections = {}
         end)
+    MakeButton(container, "清空日志", UDim2.new(0, 80, 0, 28), UDim2.new(0, 255, 0, 98), Color3.fromRGB(60, 50, 50),
+        function() ClearScrollFrame(logContainer) end)
+end
+
+-- =========================== Tab 5: 元数据面板 ===========================
+local function BuildMetadata(container)
+    ClearScrollFrame(container)
+    MakeLabel(container, "元数据面板", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, 4), Color3.fromRGB(255, 200, 200), 16)
+    local lp = Players and Players.LocalPlayer
+    local yPos = 34
+    if lp then
+        local fields = {
+            {"用户名", lp.Name}, {"显示名", lp.DisplayName},
+            {"用户ID", tostring(lp.UserId)}, {"账号年龄", tostring(lp.AccountAge) .. " 天"},
+            {"会员", lp.MembershipType == Enum.MembershipType.Premium and "Premium" or "免费"},
+            {"Locale", lp.LocaleId},
+        }
+        for _, f in ipairs(fields) do
+            local row = MakeFrame(container, UDim2.new(1, -10, 0, 30), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(35, 35, 45), 0)
+            MakeLabel(row, f[1] .. ":", UDim2.new(0, 80, 1, 0), UDim2.new(0, 8, 0, 0), Color3.fromRGB(150, 150, 150), 13)
+            MakeLabel(row, f[2], UDim2.new(1, -100, 1, 0), UDim2.new(0, 92, 0, 0), Color3.fromRGB(220, 220, 220), 13)
+            yPos = yPos + 33
+        end
+        -- 角色信息
+        local char = lp.Character
+        if char then
+            MakeDivider(container, UDim2.new(0, 5, 0, yPos), UDim2.new(1, -10, 0, 1))
+            yPos = yPos + 8
+            MakeLabel(container, "角色信息", UDim2.new(1, -10, 0, 22), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(100, 200, 255), 14)
+            yPos = yPos + 24
+            local hum = char:FindFirstChild("Humanoid")
+            if hum then
+                local humFields = {
+                    {"血量", string.format("%.0f / %.0f", hum.Health, hum.MaxHealth)},
+                    {"移速", string.format("%.1f", hum.WalkSpeed)},
+                    {"跳跃", string.format("%.1f", hum.JumpPower or 50)},
+                }
+                for _, f in ipairs(humFields) do
+                    local row = MakeFrame(container, UDim2.new(1, -10, 0, 26), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(35, 40, 45), 0)
+                    MakeLabel(row, f[1] .. ":", UDim2.new(0, 60, 1, 0), UDim2.new(0, 8, 0, 0), Color3.fromRGB(150, 150, 150), 12)
+                    MakeLabel(row, f[2], UDim2.new(1, -80, 1, 0), UDim2.new(0, 72, 0, 0), Color3.fromRGB(220, 220, 220), 12)
+                    yPos = yPos + 28
+                end
+            end
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local pos = hrp.Position
+                local row = MakeFrame(container, UDim2.new(1, -10, 0, 26), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(35, 40, 45), 0)
+                MakeLabel(row, "坐标:", UDim2.new(0, 60, 1, 0), UDim2.new(0, 8, 0, 0), Color3.fromRGB(150, 150, 150), 12)
+                MakeLabel(row, string.format("(%.1f, %.1f, %.1f)", pos.X, pos.Y, pos.Z), UDim2.new(1, -80, 1, 0), UDim2.new(0, 72, 0, 0), Color3.fromRGB(220, 220, 220), 12)
+                yPos = yPos + 28
+            end
+        end
+    else
+        MakeLabel(container, "LocalPlayer 不可用", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(255, 100, 100), 14)
+        yPos = yPos + 28
+    end
+    MakeDivider(container, UDim2.new(0, 5, 0, yPos), UDim2.new(1, -10, 0, 1))
+    yPos = yPos + 8
+    MakeLabel(container, "游戏信息", UDim2.new(1, -10, 0, 22), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(200, 255, 200), 14)
+    yPos = yPos + 24
+    local gameFields = {
+        {"PlaceId", tostring(game.PlaceId)}, {"GameId", tostring(game.GameId)},
+        {"名称", game.Name}, {"FPS", "计算中..."},
+    }
+    for _, f in ipairs(gameFields) do
+        local row = MakeFrame(container, UDim2.new(1, -10, 0, 28), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(35, 35, 45), 0)
+        MakeLabel(row, f[1] .. ":", UDim2.new(0, 80, 1, 0), UDim2.new(0, 8, 0, 0), Color3.fromRGB(150, 150, 150), 13)
+        MakeLabel(row, f[2], UDim2.new(1, -100, 1, 0), UDim2.new(0, 92, 0, 0), Color3.fromRGB(220, 220, 220), 13)
+        yPos = yPos + 31
+    end
+    if RunService then
+        local fpsLabel = MakeLabel(container, "", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, yPos), Color3.fromRGB(100, 255, 100), 13)
+        local lastTime = tick()
+        local frameCount = 0
+        local fpsConn = RunService.RenderStepped:Connect(function()
+            frameCount = frameCount + 1
+            local now = tick()
+            if now - lastTime >= 1 then
+                local fps = math.floor(frameCount / (now - lastTime))
+                fpsLabel.Text = "实时 FPS: " .. tostring(fps)
+                frameCount = 0
+                lastTime = now
+            end
+        end)
+        table.insert(monitorConnections, fpsConn)
+    end
 end
 
 -- =========================== Tab 6: 对象搜索 ===========================
@@ -741,7 +1036,6 @@ local function BuildSearch(container)
     MakeLabel(container, "按名称关键词搜索 Instance", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
     local searchBox = MakeTextBox(container, "关键词", UDim2.new(1, -130, 0, 36), UDim2.new(0, 5, 0, 50))
     local resultLabel = MakeLabel(container, "等待搜索", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, 90), Color3.fromRGB(180, 180, 180), 13)
-
     MakeButton(container, "🔍 搜索", UDim2.new(0, 100, 0, 36), UDim2.new(1, -110, 0, 50), Color3.fromRGB(50, 50, 75),
         function()
             local kw = searchBox.Text
@@ -773,239 +1067,217 @@ local function BuildSearch(container)
                     end)
                     MakeLabel(row, item.ClassName .. ": " .. path,
                         UDim2.new(1, -5, 1, 0), UDim2.new(0, 5, 0, 0), Color3.fromRGB(200, 200, 220), 11)
-                    MakeButton(row, "ℹ", UDim2.new(0, 24, 0, 22), UDim2.new(1, -28, 0, 2), Color3.fromRGB(60, 60, 80),
-                        function()
-                            ShowInstanceInfo(item)
-                        end):SetAttribute("TextSize", 14)
+                    local infoBtn2 = MakeButton(row, "ℹ", UDim2.new(0, 24, 0, 22), UDim2.new(1, -28, 0, 2), Color3.fromRGB(60, 60, 80),
+                        function() ShowInstanceInfo(item) end)
+                    infoBtn2.TextSize = 14
                 end
             end)
         end)
-
     MakeButton(container, "清空", UDim2.new(0, 80, 0, 36), UDim2.new(1, -110, 0, 90), Color3.fromRGB(60, 40, 40),
         function()
             resultLabel.Text = "等待搜索"
-            local existing = container:FindFirstChildOfClass("ScrollingFrame")
-            while existing do
-                existing:Destroy()
-                existing = container:FindFirstChildOfClass("ScrollingFrame")
-            end
+            local sf = container:FindFirstChildOfClass("ScrollingFrame")
+            while sf do sf:Destroy() sf = container:FindFirstChildOfClass("ScrollingFrame") end
         end)
 end
 
 -- =========================== Tab 7: RSPY 数据包嗅探 ===========================
+local function RSPY_Serialize(val, depth)
+    depth = depth or 0
+    if depth > 4 then return "..." end
+    local vt = type(val)
+    if vt == "number" then return tostring(val)
+    elseif vt == "string" then return string.format("%q", val)
+    elseif vt == "boolean" then return tostring(val)
+    elseif vt == "nil" then return "nil"
+    elseif vt == "table" then
+        local parts = {}
+        local count = 0
+        for k, v in pairs(val) do
+            count = count + 1
+            if count <= 16 then
+                local ks = type(k) == "number" and "[" .. tostring(k) .. "]" or RSPY_Serialize(k, depth + 1)
+                local vs = RSPY_Serialize(v, depth + 1)
+                table.insert(parts, ks .. "=" .. vs)
+            end
+        end
+        if count > 16 then table.insert(parts, "...") end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    else
+        local okName, name = pcall(function() return val.Name end)
+        if okName then return "[Instance:" .. name .. "]" end
+        local okCls, cls = pcall(function() return val.ClassName end)
+        if okCls then return "[" .. cls .. "]" end
+        return tostring(val)
+    end
+end
+
+local function RSPY_GetPath(inst)
+    local ok, path = pcall(function()
+        local parts = {}
+        local p = inst
+        while p do
+            table.insert(parts, 1, p.Name)
+            p = p.Parent
+        end
+        return table.concat(parts, "/")
+    end)
+    return ok and path or inst.Name
+end
+
+local function CopyToClipboard(text)
+    local ok = false
+    if setclipboard then ok = pcall(setclipboard, text) end
+    if not ok and toclipboard then ok = pcall(toclipboard, text) end
+    if not ok then pcall(function() print("[RSPY 复制] " .. text) end) end
+end
+
 local function BuildRSPY(container)
     ClearScrollFrame(container)
     MakeLabel(container, "RSPY 数据包嗅探", UDim2.new(1, -10, 0, 24), UDim2.new(0, 5, 0, 4), Color3.fromRGB(255, 150, 255), 16)
-    MakeLabel(container, "Hook Remote 并记录 FireServer/OnClientEvent 参数", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
+    MakeLabel(container, "Hook Remote 并记录 FireServer/InvokeServer/OnClientEvent", UDim2.new(1, -10, 0, 18), UDim2.new(0, 5, 0, 28), Color3.fromRGB(160, 160, 160), 12)
     local statusLabel = MakeLabel(container, "状态: 未启动", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, 48), Color3.fromRGB(180, 180, 180), 13)
     local countLabel = MakeLabel(container, "记录: 0", UDim2.new(1, -10, 0, 20), UDim2.new(0, 5, 0, 68), Color3.fromRGB(180, 180, 180), 13)
-
     local listY = 94
     local sf = MakeScrollingFrame(container, UDim2.new(1, -10, 1, -(listY + 10)), UDim2.new(0, 5, 0, listY))
-
     local function RefreshRSPYDisplay()
         ClearScrollFrame(sf)
-        local startIdx = math.max(1, #rspyRecords - 49)
+        if #rspyRecords == 0 then
+            MakeLabel(sf, "暂无记录，点击开始嗅探后操作游戏", UDim2.new(1, -10, 0, 30), nil, Color3.fromRGB(150, 150, 150), 14, Enum.TextXAlignment.Center)
+            return
+        end
+        local startIdx = math.max(1, #rspyRecords - 199)
         for i = startIdx, #rspyRecords do
             local rec = rspyRecords[i]
-            local row = MakeFrame(sf, UDim2.new(1, -4, 0, 0), nil, Color3.fromRGB(35, 35, 45), 0)
-            row.AutomaticSize = Enum.AutomaticSize.Y
-            local arrow = rec.direction == "C→S" and "⬆" or "⬇"
-            local color = rec.direction == "C→S" and Color3.fromRGB(255, 200, 150) or Color3.fromRGB(150, 200, 255)
-            local text = string.format("%s [%s] %s: %s", arrow, rec.time, rec.name, rec.params)
-            local label = MakeLabel(row, text, UDim2.new(1, -10, 0, 0), UDim2.new(0, 5, 0, 3), color, 11)
-            label.AutomaticSize = Enum.AutomaticSize.Y
-            label.TextWrapped = true
-            MakeButton(row, "📋", UDim2.new(0, 24, 0, 24), UDim2.new(1, -30, 0, 2), Color3.fromRGB(50, 50, 60),
+            local isCS = rec.direction == "C→S"
+            local rowHeight = 58
+            local row = MakeFrame(sf, UDim2.new(1, -4, 0, rowHeight), nil, Color3.fromRGB(30, 30, 40), 0)
+            local badgeColor = isCS and Color3.fromRGB(200, 120, 50) or Color3.fromRGB(50, 120, 200)
+            local badge = MakeLabel(row, rec.direction, UDim2.new(0, 42, 0, 16), UDim2.new(0, 4, 0, 4), badgeColor, 10, Enum.TextXAlignment.Center)
+            badge.BackgroundTransparency = 0.3
+            badge.BackgroundColor3 = badgeColor
+            local nameLabel = MakeLabel(row, rec.remoteName .. " (" .. rec.remoteClass .. ")", UDim2.new(0, math.min((#rec.remoteName + #rec.remoteClass + 3) * 7 + 10, 180), 0, 18), UDim2.new(0, 52, 0, 3), Color3.fromRGB(220, 220, 255), 13)
+            local pathLabel = MakeLabel(row, rec.path, UDim2.new(0, math.min(#rec.path * 6 + 10, 200), 0, 14), UDim2.new(0, 52, 0, 20), Color3.fromRGB(120, 120, 120), 10)
+            local timeLbl = MakeLabel(row, "[" .. rec.time .. "]", UDim2.new(0, 70, 0, 14), UDim2.new(0, 4, 0, 38), Color3.fromRGB(150, 150, 150), 10)
+            local paramStr = rec.argsStr or "(无参数)"
+            if #paramStr > 40 then paramStr = string.sub(paramStr, 1, 40) .. "..." end
+            MakeLabel(row, "参数: " .. paramStr, UDim2.new(1, -80, 0, 14), UDim2.new(0, 52, 0, 38), Color3.fromRGB(180, 200, 180), 10)
+            MakeButton(row, "📋", UDim2.new(0, 28, 0, 24), UDim2.new(1, -32, 0, 2), Color3.fromRGB(60, 60, 80),
                 function()
-                    pcall(function()
-                        CopyToClipboard(text)
-                        statusLabel.Text = "已复制到剪贴板"
-                    end)
+                    local copyText = string.format("[%s] %s\n路径: %s\n参数: %s", rec.time, rec.direction .. " " .. rec.remoteName, rec.path, rec.argsStr)
+                    CopyToClipboard(copyText)
                 end)
         end
     end
-
     local function HookAllRemotes()
         for _, hook in ipairs(rspyHooks) do
-            pcall(function() hook:Disconnect() end)
+            if hook.conn then pcall(function() hook.conn:Disconnect() end) end
         end
         rspyHooks = {}
+        local hookCount = 0
         local remoteTypes = {"RemoteEvent", "RemoteFunction", "UnreliableRemoteEvent"}
         local roots = {Workspace, Players, ReplicatedStorage, Lighting, game}
+        local scanned = {}
         for _, root in ipairs(roots) do
             if root then
                 local remotes = GetAllChildren(root, 0, REMOTE_SCAN_DEPTH, remoteTypes)
                 for _, remote in ipairs(remotes) do
+                    local path = RSPY_GetPath(remote)
+                    if scanned[path] then break end
+                    scanned[path] = true
                     if remote.ClassName == "RemoteEvent" or remote.ClassName == "UnreliableRemoteEvent" then
-                        local oldFire = remote.FireServer
-                        remote.FireServer = function(self, ...)
-                            local args = {...}
-                            local strArgs = ""
-                            for i = 1, math.min(#args, 5) do
-                                local v = args[i]
-                                if type(v) == "userdata" then
-                                    strArgs = strArgs .. tostring(v) .. ", "
-                                elseif type(v) == "string" then
-                                    strArgs = strArgs .. string.format("%q, ", v)
-                                else
-                                    strArgs = strArgs .. tostring(v) .. ", "
-                                end
+                        local origFire = remote.FireServer
+                        if origFire then
+                            remote.FireServer = function(self, ...)
+                                local args = {...}
+                                local record = {
+                                    time = GetTimestamp(), remoteName = remote.Name,
+                                    remoteClass = remote.ClassName, path = path,
+                                    direction = "C→S", args = args,
+                                    argsStr = RSPY_Serialize(args, 0), batchId = rspyBatchId,
+                                }
+                                rspyBatchId = rspyBatchId + 1
+                                table.insert(rspyRecords, record)
+                                if #rspyRecords > MAX_RSPY_RECORDS then table.remove(rspyRecords, 1) end
+                                rspyRefreshNeeded = true
+                                countLabel.Text = string.format("记录: %d (批次: %d)", #rspyRecords, rspyBatchId)
+                                return origFire(self, ...)
                             end
-                            if #args > 5 then strArgs = strArgs .. "..." end
-                            strArgs = strArgs:sub(1, -3)
-                            rspyBatchId = rspyBatchId + 1
-                            local now = GetTimestamp()
-                            table.insert(rspyRecords, {
-                                time = now,
-                                name = remote.Name,
-                                path = "",
-                                direction = "C→S",
-                                params = strArgs,
-                                className = remote.ClassName,
-                                batchId = rspyBatchId
-                            })
-                            if #rspyRecords > MAX_RSPY_RECORDS then
-                                table.remove(rspyRecords, 1)
-                            end
-                            countLabel.Text = string.format("记录: %d (批次: %d)", #rspyRecords, rspyBatchId)
-                            rspyRefreshNeeded = true
-                            pcall(function()
-                                oldFire(self, ...)
-                            end)
+                            table.insert(rspyHooks, {remote = remote, type = "FireServer"})
+                            hookCount = hookCount + 1
                         end
-                        table.insert(rspyHooks, {remote = remote, type = "FireServer"})
-                    end
-
-                    if remote.ClassName == "RemoteEvent" or remote.ClassName == "UnreliableRemoteEvent" then
                         local conn
                         conn = remote.OnClientEvent:Connect(function(...)
-                            if not rspyRunning then
-                                if conn then conn:Disconnect() end
-                                return
-                            end
+                            if not rspyRunning then if conn then conn:Disconnect() end return end
                             local args = {...}
-                            local strArgs = ""
-                            for i = 1, math.min(#args, 5) do
-                                local v = args[i]
-                                if type(v) == "userdata" then
-                                    strArgs = strArgs .. tostring(v) .. ", "
-                                elseif type(v) == "string" then
-                                    strArgs = strArgs .. string.format("%q, ", v)
-                                else
-                                    strArgs = strArgs .. tostring(v) .. ", "
-                                end
-                            end
-                            if #args > 5 then strArgs = strArgs .. "..." end
-                            strArgs = strArgs:sub(1, -3)
+                            local record = {
+                                time = GetTimestamp(), remoteName = remote.Name,
+                                remoteClass = remote.ClassName, path = path,
+                                direction = "S→C", args = args,
+                                argsStr = RSPY_Serialize(args, 0), batchId = rspyBatchId,
+                            }
                             rspyBatchId = rspyBatchId + 1
-                            local now = GetTimestamp()
-                            table.insert(rspyRecords, {
-                                time = now,
-                                name = remote.Name,
-                                path = "",
-                                direction = "S→C",
-                                params = strArgs,
-                                className = remote.ClassName,
-                                batchId = rspyBatchId
-                            })
-                            if #rspyRecords > MAX_RSPY_RECORDS then
-                                table.remove(rspyRecords, 1)
-                            end
-                            countLabel.Text = string.format("记录: %d (批次: %d)", #rspyRecords, rspyBatchId)
+                            table.insert(rspyRecords, record)
+                            if #rspyRecords > MAX_RSPY_RECORDS then table.remove(rspyRecords, 1) end
                             rspyRefreshNeeded = true
+                            countLabel.Text = string.format("记录: %d (批次: %d)", #rspyRecords, rspyBatchId)
                         end)
-                        table.insert(rspyHooks, {remote = remote, type = "OnClientEvent", conn = conn})
+                        table.insert(rspyHooks, {remote = remote, conn = conn})
+                        hookCount = hookCount + 1
                     end
-
                     if remote.ClassName == "RemoteFunction" then
-                        local oldInvoke = remote.InvokeServer
-                        remote.InvokeServer = function(self, ...)
-                            local args = {...}
-                            local strArgs = ""
-                            for i = 1, math.min(#args, 5) do
-                                local v = args[i]
-                                if type(v) == "userdata" then
-                                    strArgs = strArgs .. tostring(v) .. ", "
-                                elseif type(v) == "string" then
-                                    strArgs = strArgs .. string.format("%q, ", v)
-                                else
-                                    strArgs = strArgs .. tostring(v) .. ", "
-                                end
+                        local origInvoke = remote.InvokeServer
+                        if origInvoke then
+                            remote.InvokeServer = function(self, ...)
+                                local args = {...}
+                                local record = {
+                                    time = GetTimestamp(), remoteName = remote.Name,
+                                    remoteClass = remote.ClassName, path = path,
+                                    direction = "C→S", args = args,
+                                    argsStr = "[Invoke] " .. RSPY_Serialize(args, 0), batchId = rspyBatchId,
+                                }
+                                rspyBatchId = rspyBatchId + 1
+                                table.insert(rspyRecords, record)
+                                if #rspyRecords > MAX_RSPY_RECORDS then table.remove(rspyRecords, 1) end
+                                rspyRefreshNeeded = true
+                                countLabel.Text = string.format("记录: %d (批次: %d)", #rspyRecords, rspyBatchId)
+                                return origInvoke(self, ...)
                             end
-                            if #args > 5 then strArgs = strArgs .. "..." end
-                            strArgs = strArgs:sub(1, -3)
-                            rspyBatchId = rspyBatchId + 1
-                            local now = GetTimestamp()
-                            table.insert(rspyRecords, {
-                                time = now,
-                                name = remote.Name,
-                                path = "",
-                                direction = "C→S",
-                                params = "[Invoke] " .. strArgs,
-                                className = remote.ClassName,
-                                batchId = rspyBatchId
-                            })
-                            if #rspyRecords > MAX_RSPY_RECORDS then
-                                table.remove(rspyRecords, 1)
-                            end
-                            countLabel.Text = string.format("记录: %d (批次: %d)", #rspyRecords, rspyBatchId)
-                            rspyRefreshNeeded = true
-                            pcall(function()
-                                return oldInvoke(self, ...)
-                            end)
+                            table.insert(rspyHooks, {remote = remote, type = "InvokeServer"})
+                            hookCount = hookCount + 1
                         end
-                        table.insert(rspyHooks, {remote = remote, type = "InvokeServer"})
                     end
                 end
             end
         end
         rspyRunning = true
-        statusLabel.Text = string.format("状态: 运行中 (%d 个 Remote 已 Hook)", #rspyHooks)
+        statusLabel.Text = string.format("状态: 🟢 运行中 (%d 个 Remote 已 Hook)", hookCount)
+        statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
     end
-
     local function UnhookAllRemotes()
         rspyRunning = false
         for _, hook in ipairs(rspyHooks) do
-            if hook.type == "OnClientEvent" and hook.conn then
-                pcall(function() hook.conn:Disconnect() end)
-            end
+            if hook.conn then pcall(function() hook.conn:Disconnect() end) end
         end
         rspyHooks = {}
-        statusLabel.Text = "状态: 已停止"
+        statusLabel.Text = "状态: ⏹ 已停止"
+        statusLabel.TextColor3 = Color3.fromRGB(200, 200, 100)
     end
-
     MakeButton(container, "▶ 开始嗅探", UDim2.new(0, 120, 0, 34), UDim2.new(0, 5, 0, 90), Color3.fromRGB(50, 80, 50),
         function()
             if rspyRunning then return end
             statusLabel.Text = "正在 Hook..."
-            task.delay(0.1, function()
-                HookAllRemotes()
-                ShowNotification("RSPY", "数据包嗅探已启动")
-            end)
+            task.delay(0.1, function() HookAllRemotes() _G.DENotifySuccess("RSPY", "数据包嗅探已启动") end)
         end)
-
     MakeButton(container, "⏹ 停止嗅探", UDim2.new(0, 120, 0, 34), UDim2.new(0, 130, 0, 90), Color3.fromRGB(80, 40, 40),
-        function()
-            UnhookAllRemotes()
-            ShowNotification("RSPY", "数据包嗅探已停止")
-        end)
-
+        function() UnhookAllRemotes() _G.DENotifyInfo("RSPY", "数据包嗅探已停止") end)
     MakeButton(container, "清空记录", UDim2.new(0, 100, 0, 34), UDim2.new(0, 255, 0, 90), Color3.fromRGB(60, 60, 40),
-        function()
-            rspyRecords = {}
-            countLabel.Text = "记录: 0"
-            rspyBatchId = 0
-            ClearScrollFrame(sf)
-        end)
-
+        function() rspyRecords = {} countLabel.Text = "记录: 0" rspyBatchId = 0 ClearScrollFrame(sf) end)
     if rspyRefreshConn then rspyRefreshConn:Disconnect() end
     rspyRefreshConn = RunService and RunService.RenderStepped:Connect(function()
-        if rspyRefreshNeeded then
-            rspyRefreshNeeded = false
-            RefreshRSPYDisplay()
-        end
+        if rspyRefreshNeeded then rspyRefreshNeeded = false RefreshRSPYDisplay() end
     end)
+    RefreshRSPYDisplay()
 end
 
 -- =========================== GUI 构建 ===========================
@@ -1025,59 +1297,42 @@ local function GetGUIParent()
     return nil
 end
 
--- 复制到剪贴板（兼容多种注入器）
-local function CopyToClipboard(text)
-    local ok = false
-    if setclipboard then
-        ok = pcall(setclipboard, text)
-    end
-    if not ok and toclipboard then
-        ok = pcall(toclipboard, text)
-    end
-end
-
 local function BuildMainGUI()
     local guiParent = GetGUIParent()
     if not guiParent then
-        if not Players or not Players.LocalPlayer then
-            ShowNotification("DeltaExplorer", "GUI 挂载失败: 无可用父容器", 5)
-            return false
+        if Players and Players.LocalPlayer then
+            guiParent = Players.LocalPlayer:FindFirstChild("PlayerGui")
         end
-        guiParent = Players.LocalPlayer:FindFirstChild("PlayerGui")
-        if not guiParent then
-            ShowNotification("DeltaExplorer", "GUI 挂载失败: PlayerGui 不可用", 5)
-            return false
-        end
+        if not guiParent then return false, "PlayerGui not found" end
     end
-
     local gui = Instance.new("ScreenGui")
     gui.Name = "DeltaExplorer_v2"
     gui.ResetOnSpawn = false
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.DisplayOrder = 100
-
-    local success = pcall(function()
-        gui.Parent = guiParent
-    end)
-    if not success then
-        ShowNotification("DeltaExplorer", "GUI 挂载失败: 无法设置父级", 5)
-        return false
-    end
-
+    local success = pcall(function() gui.Parent = guiParent end)
+    if not success then return false, "Cannot parent GUI" end
     DE_GUI = gui
 
-    local viewport = Workspace and Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600)
-    local mainW = math.min(420, viewport.X - 20)
-    local mainH = math.min(560, viewport.Y - 40)
+    -- 屏幕尺寸适配
+    local screenSize = Vector2.new(800, 600)
+    local ok, ss = pcall(function()
+        if Workspace and Workspace.CurrentCamera then
+            return Workspace.CurrentCamera.ViewportSize
+        end
+        return nil
+    end)
+    if ok and ss then screenSize = ss end
+
+    local mainW = math.min(420, screenSize.X - 20)
+    local mainH = math.min(600, screenSize.Y - 40)
 
     local main = MakeFrame(gui, UDim2.new(0, mainW, 0, mainH), UDim2.new(0.5, -mainW/2, 0.5, -mainH/2), Color3.fromRGB(20, 20, 28), 0)
     main.Name = "MainFrame"
     DE_MainUI = main
-
     local mainCorner = Instance.new("UICorner")
     mainCorner.CornerRadius = UDim.new(0, 10)
     mainCorner.Parent = main
-
     local stroke = Instance.new("UIStroke")
     stroke.Color = Color3.fromRGB(60, 60, 80)
     stroke.Thickness = 1.5
@@ -1089,17 +1344,11 @@ local function BuildMainGUI()
     local titleCorn = Instance.new("UICorner")
     titleCorn.CornerRadius = UDim.new(0, 10)
     titleCorn.Parent = titleBar
+    local titleLabel = MakeLabel(titleBar, "🔍 " .. APP_NAME, UDim2.new(1, -50, 1, 0), UDim2.new(0, 12, 0, 0), Color3.fromRGB(255, 255, 255), 16, Enum.TextXAlignment.Left)
+    titleLabel.Font = Enum.Font.GothamBold
 
-    MakeLabel(titleBar, "🔍 " .. APP_NAME, UDim2.new(1, -50, 1, 0), UDim2.new(0, 12, 0, 0), Color3.fromRGB(255, 255, 255), 16, Enum.TextXAlignment.Left)
-
-    -- 最小化
-    MakeButton(titleBar, "—", UDim2.new(0, 30, 0, 28), UDim2.new(1, -68, 0, 5), Color3.fromRGB(50, 50, 60),
-        function()
-            gui.Enabled = false
-        end)
-
-    -- 关闭
-    MakeButton(titleBar, "✕", UDim2.new(0, 30, 0, 28), UDim2.new(1, -34, 0, 5), Color3.fromRGB(80, 30, 30),
+    -- 关闭按钮
+    local closeBtn = MakeButton(titleBar, "✕", UDim2.new(0, 30, 0, 28), UDim2.new(1, -34, 0, 5), Color3.fromRGB(80, 30, 30),
         function()
             for _, c in ipairs(monitorConnections) do
                 pcall(function() c:Disconnect() end)
@@ -1107,16 +1356,17 @@ local function BuildMainGUI()
             monitorConnections = {}
             if rspyRefreshConn then rspyRefreshConn:Disconnect() rspyRefreshConn = nil end
             if rspyRunning then UnhookAllRemotes() end
-            if DE_GUI then DE_GUI:Destroy() end
+            DE_GUI:Destroy()
             DE_GUI = nil
             DE_MainUI = nil
         end)
+    closeBtn.TextSize = 16
 
     -- 拖拽功能 (触摸兼容)
     local dragging = false
     local dragInput, dragStart, startPos
     titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
             startPos = main.Position
@@ -1126,7 +1376,7 @@ local function BuildMainGUI()
         end
     end)
     titleBar.InputChanged:Connect(function(input)
-        if (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) and dragging then
+        if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and dragging then
             dragInput = input
         end
     end)
@@ -1141,18 +1391,11 @@ local function BuildMainGUI()
 
     -- 标签页按钮
     local tabData = {
-        {"📊", "元数据"},
-        {"📁", "浏览器"},
-        {"🔢", "值扫描"},
-        {"📡", "Remote"},
-        {"👁", "监控"},
-        {"🔍", "搜索"},
-        {"🎣", "RSPY"},
+        {"📊", "元数据"}, {"📁", "浏览器"}, {"🔢", "值扫描"},
+        {"📡", "Remote"}, {"👁", "监控"}, {"🔍", "搜索"}, {"🎣", "RSPY"},
     }
-
     local tabBar = MakeFrame(main, UDim2.new(1, -12, 0, 36), UDim2.new(0, 6, 0, 42), Color3.fromRGB(25, 25, 35), 0)
     tabBar.Name = "TabBar"
-
     local tabLayout = Instance.new("UIListLayout")
     tabLayout.FillDirection = Enum.FillDirection.Horizontal
     tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -1163,8 +1406,8 @@ local function BuildMainGUI()
 
     local contentArea = MakeFrame(main, UDim2.new(1, -12, 1, -(84 + 8)), UDim2.new(0, 6, 0, 84), Color3.fromRGB(22, 22, 30), 0)
     contentArea.Name = "ContentArea"
-
     local tabButtons = {}
+    local tabContainers = {}
     local currentTabIndex = 1
 
     local function SwitchTab(idx)
@@ -1174,36 +1417,28 @@ local function BuildMainGUI()
         end
         ClearScrollFrame(contentArea)
         local tabName = tabData[idx][2]
-        if tabName == "元数据" then
-            BuildMetadata(contentArea)
+        if tabName == "元数据" then BuildMetadata(contentArea)
         elseif tabName == "浏览器" then
-            browserState.currentRoot = browserState.currentRoot or Workspace
-            BuildBrowserTree(contentArea, browserState.currentRoot, 1)
-        elseif tabName == "值扫描" then
-            BuildValueScanner(contentArea)
-        elseif tabName == "Remote" then
-            BuildRemoteDiscovery(contentArea)
-        elseif tabName == "监控" then
-            BuildMonitor(contentArea)
-        elseif tabName == "搜索" then
-            BuildSearch(contentArea)
-        elseif tabName == "RSPY" then
-            BuildRSPY(contentArea)
+            DE_BrowserRoot = DE_BrowserRoot or Workspace
+            BuildBrowserTree(contentArea, DE_BrowserRoot, 1)
+        elseif tabName == "值扫描" then BuildValueScanner(contentArea)
+        elseif tabName == "Remote" then BuildRemoteDiscovery(contentArea)
+        elseif tabName == "监控" then BuildMonitor(contentArea)
+        elseif tabName == "搜索" then BuildSearch(contentArea)
+        elseif tabName == "RSPY" then BuildRSPY(contentArea)
         end
     end
 
     for i, td in ipairs(tabData) do
         local btn = MakeButton(tabBar, td[1] .. " " .. td[2], UDim2.new(0, 0, 0, 30), nil, Color3.fromRGB(35, 35, 45),
-            function()
-                SwitchTab(i)
-            end)
+            function() SwitchTab(i) end)
         btn.AutomaticSize = Enum.AutomaticSize.X
         btn.TextSize = 12
         table.insert(tabButtons, btn)
     end
 
     -- 底部状态栏
-    MakeLabel(main, "DeltaExplorer " .. VERSION .. " | Delta Injector 专用", UDim2.new(1, -12, 0, 20), UDim2.new(0, 6, 1, -22), Color3.fromRGB(120, 120, 130), 11, Enum.TextXAlignment.Center)
+    MakeLabel(main, "DeltaExplorer " .. VERSION .. " | 通用", UDim2.new(1, -12, 0, 20), UDim2.new(0, 6, 1, -22), Color3.fromRGB(120, 120, 130), 11, Enum.TextXAlignment.Center)
 
     -- 默认显示第一个标签
     SwitchTab(1)
@@ -1211,8 +1446,42 @@ local function BuildMainGUI()
 end
 
 -- =========================== 启动 ===========================
-ShowNotification("DeltaExplorer", "正在加载 " .. VERSION .. " ...", 2)
-
-task.delay(0.5, function()
-    pcall(BuildMainGUI)
+-- 启动通知
+pcall(function()
+    if StarterGui then
+        StarterGui:SetCore("SendNotification", {
+            Title = "DeltaExplorer",
+            Text = "正在加载 " .. VERSION .. " ...",
+            Duration = 2
+        })
+    end
 end)
+
+-- 延迟初始化 NotifySystem
+task.delay(0.3, function()
+    pcall(function()
+        _G.DENotifySystem.SetupContainer()
+    end)
+end)
+
+-- 延迟构建 GUI
+task.delay(0.8, function()
+    local ok, msg = BuildMainGUI()
+    if ok then
+        _G.DENotifySuccess("DeltaExplorer", "已成功加载 " .. VERSION)
+    else
+        _G.DENotifyError("加载失败", msg or "未知错误")
+        pcall(function()
+            if StarterGui then
+                StarterGui:SetCore("SendNotification", {
+                    Title = "DeltaExplorer 错误",
+                    Text = "GUI 加载失败: " .. (msg or "未知错误"),
+                    Duration = 5
+                })
+            end
+        end)
+    end
+end)
+
+-- 纯顶层代码结束 — 没有 return function(...) wrapper, 没有 end)(...)
+-- 所有函数/变量均为 local, 全局仅 _G.DENotify 系列
