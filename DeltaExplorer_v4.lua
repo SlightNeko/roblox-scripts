@@ -4,18 +4,15 @@ GameId: 通用
 版本: v4.2
 兼容: Delta Injector (标准 UNC)
 --]]
-
 local S=function(n)local o,e=pcall(game.GetService,game,n);return o and e or nil end
 local Pl=S("Players");local SG=S("StarterGui");local CG=S("CoreGui");local RS=S("RunService")
 pcall(function()SG:SetCore("SendNotification",{Title="资源浏览器 v4.2",Text="加载中",Duration=2})end)
 local lp=Pl.LocalPlayer;if not lp then lp=Pl:FindFirstChild("LocalPlayer")end;if not lp then return end
 local pg=lp:FindFirstChild("PlayerGui");if not pg then return end
-
 local gui=Instance.new("ScreenGui");gui.Name="DeltaExplorerV4";gui.ResetOnSpawn=false;gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling;gui.DisplayOrder=100
 
 local ok=pcall(function()gui.Parent=CG end)
 if not ok then ok=pcall(function()gui.Parent=pg end);if not ok then gui:Destroy();return end end
-
 local restoreBtn=nil
 local function createRestore()
  if restoreBtn then return end
@@ -28,11 +25,9 @@ local function createRestore()
   if restoreBtn then restoreBtn:Destroy();restoreBtn=nil end
  end)
 end
-
 local m=Instance.new("Frame");m.Size=UDim2.new(0,400,0,500);m.Position=UDim2.new(0.5,-200,0.3,-150)
 m.BackgroundColor3=Color3.fromRGB(20,20,28);m.BorderSizePixel=0;m.Active=true;m.Parent=gui
 local mCorner=Instance.new("UICorner",m);mCorner.CornerRadius=UDim.new(0,8)
-
 local tb=Instance.new("Frame",m);tb.Size=UDim2.new(1,0,0,30);tb.Position=UDim2.new(0,0,0,0)
 tb.BackgroundColor3=Color3.fromRGB(14,14,20);tb.BorderSizePixel=0
 local tbCorner=Instance.new("UICorner",tb);tbCorner.CornerRadius=UDim.new(0,8)
@@ -54,7 +49,6 @@ tb.InputEnded:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseBut
 
 local bar=Instance.new("Frame",m);bar.Size=UDim2.new(1,0,0,28);bar.Position=UDim2.new(0,0,0,30)
 bar.BackgroundColor3=Color3.fromRGB(26,26,36);bar.BorderSizePixel=0
-
 local tns={"信息","浏览器","值扫描","监控","搜索","远程"};local tbs={};local tps={}
 local tcs={Color3.fromRGB(55,55,75),Color3.fromRGB(50,60,75),Color3.fromRGB(55,70,55),Color3.fromRGB(70,55,55),Color3.fromRGB(65,55,70),Color3.fromRGB(55,55,70)};local tac=Color3.fromRGB(70,70,95)
 
@@ -118,7 +112,6 @@ local function bt(pan,obj,depth,md)
  btn.MouseButton1Click:Connect(function()es[k]=not es[k];rf()end);return btn
 end
 for _,ch in ipairs(game:GetChildren())do bt(bp,ch,0,2)end
-
 local vp=tps[3];local vcs={"NumberValue","IntValue","BoolValue","StringValue"}
 local vh=L(vp,"按类扫描:",Color3.fromRGB(255,200,100))
 local function doScan(cn)
@@ -218,7 +211,6 @@ end
 sb.MouseButton1Click:Connect(function()
  if monitoring then stopMonitor(true)else startMonitor()end
 end)
-
 local sp=tps[5]
 local sh=L(sp,"按名称或类搜索:",Color3.fromRGB(255,200,100))
 local sb2=Instance.new("TextBox",sp);sb2.Size=UDim2.new(1,-10,0,24);sb2.BackgroundColor3=Color3.fromRGB(30,30,40)
