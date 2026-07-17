@@ -1,0 +1,1 @@
+game:GetService("StarterGui"):SetCore("SendNotification", {Title = "Test", Text = "Delta 测试", Duration = 3})
