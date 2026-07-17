@@ -1,4 +1,4 @@
-# DeltaExplorer 兼容规范 v1
+# DeltaExplorer 兼容规范 v2
 
 ## 目标
 为 Delta Injector (https://deltaexploits.gg) 编写可执行的 Roblox Luau 脚本。
@@ -6,23 +6,47 @@
 ## 代码结构规范
 
 ### 绝对禁止
+
 1. **禁止 `return (function(...)` 包装** — Delta 的 `loadstring()` 会自动做函数包装，脚本里不能再手动加。
-2. **禁止 emoji（Unicode 表情符号）** — 不在字符串、注释、变量名中使用 emoji（🔍📊✕✅❌等）。只用 ASCII 字符。
-3. **禁止 `task.delay()` 启动** — 初始化代码必须同步执行，不要用延迟。
-4. **禁止 `coroutine.wrap()`** — 改用 `task.spawn()` 或直接 `pcall()`。
-5. **禁止使用未定义的全局变量** — 所有变量必须是 `local` 或 `_G.xxx`。
+
+2. **禁止在表达式上直接赋值属性** — 以下写法非法：
+   ```lua
+   MakeButton(...).TextSize = 14        -- 非法
+   MakeButton(...):TextSize = 14        -- 非法
+   ```
+   必须用临时变量：
+   ```lua
+   local btn = MakeButton(...)
+   btn.TextSize = 14
+   ```
+
+3. **禁止 emoji（Unicode 表情符号）** — 不在字符串、注释、变量名中使用 emoji（🔍📊✕✅❌📁🔢📡等）。只用 ASCII 字符。
+
+4. **禁止 `task.delay()` 启动** — 初始化代码必须同步执行，不要用延迟。
+
+5. **禁止 `coroutine.wrap()`** — 改用 `task.spawn()` 或直接 `pcall()`。
+
+6. **禁止使用未定义的全局变量** — 所有变量必须是 `local` 或 `_G.xxx`。
 
 ### 必须遵守
+
 1. **纯顶层代码** — 所有函数定义和启动代码必须写在文件最顶层，没有外层函数包装。
+
 2. **GUI 挂载必须容错** — 尝试以下顺序：
    - `pcall(function() gui.Parent = game:GetService("CoreGui") end)`
    - 如果失败，用 `Players.LocalPlayer:FindFirstChild("PlayerGui")`
    - 如果还失败，显示 StarterGui 通知然后 return
+
 3. **所有 `game:GetService` 调用**必须用 `pcall` 包裹。
+
 4. **文件大小控制在 300 行以内** — 功能精简，小文件更稳定。
-5. **所有 Instance 创建** — 必须用 `Instance.new("ClassName")`，不要用 `Instance.new` 的缩写。
+
+5. **所有 Instance 创建** — 必须用 `local xxx = Instance.new("ClassName")` 然后设属性，不能用链式写法。
+
+6. **生成后必须做语法检查** — 用 `luac -p file.lua` 验证无错误，无 waring 再提交。
 
 ### UI 规范
+
 1. 窗口尺寸：最大 400x500
 2. 背景色：Color3.fromRGB(20, 20, 28)
 3. 标题栏：深灰底色，金色/黄色文字
@@ -33,6 +57,7 @@
 8. **不要用 TweenService** — 可能导致不可预知的挂起
 
 ### 通知系统
+
 1. 首选用 `StarterGui:SetCore("SendNotification", {...})` 做简单通知
 2. 可选 `_G.DENotifySystem`（仅当空间足够时，至少 150 行上限）
 3. `_G.DENotifySystem.SetupContainer()` 必须在容器存在时才执行
@@ -77,9 +102,21 @@ end
 -- 然后构建 UI...
 ```
 
+## 生成后验证流程（Worker 必须执行）
+
+```bash
+# 验证 Lua 语法
+luac -p /path/to/output.lua
+if [ $? -ne 0 ]; then
+    echo "语法错误，重新生成"
+    exit 1
+fi
+```
+
 ## 审核清单
 代码交付后必须逐个检查：
 - [ ] 无 `return (function(...)` 包装
+- [ ] 所有实例赋值先用 tmp var 再设属性（无链式 `.Prop = val`）
 - [ ] 无 emoji 字符
 - [ ] 无 `task.delay` 在启动流程
 - [ ] 无未 `pcall` 包裹的 `game:GetService`
@@ -87,6 +124,7 @@ end
 - [ ] 文件不超过 300 行
 - [ ] GUI 有容错挂载
 - [ ] 关闭按钮能正确销毁 GUI
+- [ ] `luac -p` 无语法错误
 
 ## 测试方法
 1. 在 Delta 中直接粘贴执行
